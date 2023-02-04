@@ -13,6 +13,8 @@
 /* errno */
 #include <linux/errno.h>
 
+#include <linux/of.h>
+
 #define IIC1602_NAME "iic1602"             
 
 /* low 4-bits */
@@ -20,6 +22,10 @@
 #define P1_RW 			(0x02)
 #define P2_E 			(0x04)
 #define P3_BACKLIGHT 	(0x08)
+
+/* mode  */
+#define IIC_4_BIT_MODE	(0)
+#define IIC_8_BIT_MODE	(1)
 
 /* IIC1602 Instruction set */
 #define IIC_INS_CLEAR_DISPLAY 				(0x01)
@@ -74,6 +80,22 @@
 
 int debug = 1;
 
+enum {
+	RS = 0,
+	RW,
+	E,
+	MAX_CTRL_PINS,
+};
+
+struct iic1602_spec {
+	int mode;
+	u16 column;
+	u16 row;
+	u8 ctrl_pin[MAX_CTRL_PINS];
+	u8 backlight_pin;
+	u8 *data_pin;
+};
+
 struct iic1602_reg_info {
 	unsigned char val;
 	unsigned char addr;	
@@ -82,6 +104,7 @@ struct iic1602_reg_info {
 struct iic1602_info {
 	struct i2c_client *client;
 	struct icc1602_reg *regs;
+	struct iic1602_spec spec;
 	bool is_backlight_on;
 };
 
@@ -118,6 +141,16 @@ static int iic1602_write_4bits(const unsigned char data)
 	i2c_smbus_write_byte(yohda_i2c_client, (data & ~P2_E)); 
 	ndelay(270);
 
+	return 0;
+}
+
+static int iic1602_write_instruction(void)
+{
+	return 0;
+}
+
+static int iic1602_write_data(void)
+{
 	return 0;
 }
 
@@ -305,8 +338,64 @@ static int iic1602_read(unsigned char *buf)
 	return 0;	
 }
 
-static int iic1602_init(void)
+static int iic1602_parse_dts(const struct device_node *np, struct iic1602_info *iic1602)
 {
+	struct iic1602_spec *spec = &iic1602->spec;
+	struct i2c_client *client = iic1602->client;
+	int ret = 0, data_pin_num;	
+		
+	ret = of_property_read_u32(np, "mode", &spec->mode);
+	if(ret || (spec->mode != IIC_4_BIT_MODE && spec->mode != IIC_8_BIT_MODE)) {
+		pr_err("Not founded the mode property in device node.\n");
+		return ret;
+	}
+	
+	ret = of_property_read_u8_array(np, "pin-ctrl", spec->ctrl_pin, MAX_CTRL_PINS);
+	if(ret) {
+		pr_err("Not founded the pin-ctrl property in device node.\n");
+		return ret;
+	}
+	
+	data_pin_num = spec->mode ? 8 : 4;
+	spec->data_pin = devm_kmalloc_array(&client->dev, data_pin_num, sizeof(int), GFP_KERNEL);
+	if(!(spec->data_pin)) {
+		pr_err("Not founded the pin-data property in device node.\n");
+		return -ENOMEM; 
+	}
+
+	ret = of_property_read_u8_array(np, "pin-data", spec->data_pin, data_pin_num);
+	if(ret) {
+		pr_err("Not founded the pin-data property in device node.\n");
+		return ret;
+	}
+
+	ret = of_property_read_u8(np, "pin-backlight", &spec->backlight_pin);
+	if(ret || spec->backlight_pin < 0) {
+		pr_err("Not founded the mode property in device node or pin-backlight value is invalid\n");
+		return ret;
+	}
+	
+	ret = of_property_read_u16(np, "display-columns", &spec->column);
+	if(ret || !spec->column) {
+		pr_err("Not founded the display-columns property in device node. %d\n", spec->column);
+		return ret;
+	}
+
+	ret = of_property_read_u16(np, "display-rows", &spec->row);
+	if(ret || !spec->row) {
+		pr_err("Not founded the display-rows property in device node.%d\n", spec->row);
+		return ret;
+	}
+
+	return 0;
+}
+
+static int iic1602_init(const struct iic1602_info* iic1602)
+{
+	struct iic1602_spec *spec = &iic1602->spec;
+	u8 function_set = spec->mode ? BIT8 : BIT4; 
+	function_set |= LINE2;
+
 	/* 8-bit initialize */
 	iic1602_write_8bits(0x30|P3_BACKLIGHT);
 	mdelay(5);
@@ -316,16 +405,13 @@ static int iic1602_init(void)
 	udelay(100);
 	iic1602_write_8bits(0x20|P3_BACKLIGHT);
 	
-	/* Function Set */
-	iic1602_write_4bits_instruction(BIT4|LINE2);
+	iic1602_write_4bits_instruction(function_set); /* Function Set */
+	udelay(53);
+	  
+	iic1602_display_on(FALSE); /* Display On/Off */
 	udelay(53);
 
-	/* Display On/Off */  
-	iic1602_display_on(FALSE);
-	udelay(53);
-
-	/* Clear Display */
-	iic1602_clear_display();
+	iic1602_clear_display(); /* Clear Display */
 	mdelay(3);
 
 	/* Entry Mode set(0x03) I/D:0x02, S:0x01 */
@@ -353,19 +439,23 @@ static int iic1602_probe(struct i2c_client *client,
 		return -EIO;
 	}
 
-	iic1602 = devm_kzalloc(&client->dev, sizeof(struct iic1602_info), GFP_KERNEL);
+	iic1602 = devm_kzalloc(&client->dev, sizeof(*iic1602), GFP_KERNEL);
 	if(!iic1602)
 	{
 		pr_err("Couldn`t allocate the memory.\n");
 		return -ENOMEM;
 	}
+	
+	iic1602->client = client;
+	yohda_i2c_client = client;
+	
+	err = iic1602_parse_dts(client->dev.of_node, iic1602);
+	if(err)
+		return err;	
+	
+	iic1602_init(iic1602);
 
 	i2c_set_clientdata(client, iic1602);
-
-	iic1602->client = client;
-
-	yohda_i2c_client = client;
-	iic1602_init();
 
 	iic1602_write_string("0");
 	//msleep(1000);
@@ -455,7 +545,6 @@ static void __exit yohda_iic1602_exit(void)
 
 module_init(yohda_iic1602_init);
 module_exit(yohda_iic1602_exit);
-
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Yohan Yoon <dbsdy1235@gmail.com>");
