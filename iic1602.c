@@ -13,6 +13,7 @@
 /* errno */
 #include <linux/errno.h>
 
+/* Open Firmware (Devicetree) */
 #include <linux/of.h>
 
 #define IIC1602_NAME "iic1602"             
@@ -78,7 +79,16 @@
 	#define ST_DIS_5_11(x)				((x)|((0x01)<<4))
 #endif
 
-int debug = 1;
+#define IIC_MAX_STR_LEN ((IIC_MAX_ROW+1)*2)
+
+static int debug;
+module_param(debug, int, 0644);
+MODULE_PARM_DESC(debug, "Turn on/off debug level log(default 0)");
+    
+#define dprintk(fmt, arg...) do {                   \                                                
+    if (debug)                          \
+        printk(KERN_DEBUG pr_fmt("%s: " fmt),  __func__, ##arg);         \
+} while (0)
 
 enum {
 	RS = 0,
@@ -86,6 +96,8 @@ enum {
 	E,
 	MAX_CTRL_PINS,
 };
+
+static struct class *iic1602_class;
 
 struct iic1602_spec {
 	int mode;
@@ -96,21 +108,28 @@ struct iic1602_spec {
 	u8 *data_pin;
 };
 
+struct iic1602_status {
+	int row;
+	int col;
+	char string[IIC_MAX_STR_LEN];
+};
+
 struct iic1602_reg_info {
 	unsigned char val;
 	unsigned char addr;	
 };
 
-struct iic1602_info {
+struct iic1602_chip {
 	struct i2c_client *client;
 	struct icc1602_reg *regs;
 	struct iic1602_spec spec;
+	struct iic1602_status status;
 	bool is_backlight_on;
 };
 
 static struct i2c_client  *yohda_i2c_client = NULL;  
 
-static int iic1602_write_8bits(const unsigned char data)
+static int iic1602_write(const struct iic1602_chip *iic1602, const unsigned char data)
 {
 	i2c_smbus_write_byte(yohda_i2c_client, data); 
 	ndelay(50); // Tsa(40ns)
@@ -127,65 +146,29 @@ static int iic1602_write_8bits(const unsigned char data)
 	return 0;
 }
 
-static int iic1602_write_4bits(const unsigned char data)
-{
-	i2c_smbus_write_byte(yohda_i2c_client, data); 
-	ndelay(50); // Tsa(40ns)
-	
-	i2c_smbus_write_byte(yohda_i2c_client, P2_E);
-	ndelay(150); // PWeh(230ns) - Tdsw(80ns) = 150ns
-	
-	i2c_smbus_write_byte(yohda_i2c_client, data|P2_E); 
-	ndelay(80);
-	
-	i2c_smbus_write_byte(yohda_i2c_client, (data & ~P2_E)); 
-	ndelay(270);
-
-	return 0;
-}
-
-static int iic1602_write_instruction(void)
+static int iic1602_write_8bits_instruction(void)
 {
 	return 0;
 }
 
-static int iic1602_write_data(void)
+static int iic1602_write_8bits_data(void)
 {
 	return 0;
 }
 
-static void iic1602_write_4bits_instruction(const unsigned char instruction)
+static void iic1602_write_4bits_instruction(const struct iic1602_chip *iic1602, const unsigned char instruction)
 {
-	iic1602_write_4bits((instruction & 0xF0) | P3_BACKLIGHT);
-	iic1602_write_4bits(((instruction << 4) & 0xF0) | P3_BACKLIGHT);
+	iic1602_write(iic1602, (instruction & 0xF0) | P3_BACKLIGHT);
+	iic1602_write(iic1602, ((instruction << 4) & 0xF0) | P3_BACKLIGHT);
 }
 
-static void iic1602_write_4bits_data(const unsigned char data)
+static void iic1602_write_4bits_data(const struct iic1602_chip *iic1602, const unsigned char data)
 {
-	iic1602_write_4bits((data & 0xF0) | P3_BACKLIGHT | P0_RS);
-	iic1602_write_4bits(((data << 4) & 0xF0) | P3_BACKLIGHT | P0_RS);
+	iic1602_write(iic1602, (data & 0xF0) | P3_BACKLIGHT | P0_RS);
+	iic1602_write(iic1602, ((data << 4) & 0xF0) | P3_BACKLIGHT | P0_RS);
 }
 
-static int iic1602_write_string(const char *string)
-{
-	int len = strlen(string);
-		
-	if(len < IIC_MIN_ROW || len > IIC_MAX_ROW)
-	{
-		pr_err("[YOHDA] length of arguemnt:%d\n", len);
-		return -EINVAL;
-	}		
-
-	while(*string)
-	{
-		iic1602_write_4bits_data(*string);
-		string++;
-	}
-
-	return 0;
-}
-
-static int iic1602_set_position(const int col, const int row)
+static int iic1602_set_position(const struct iic1602_chip *iic1602, const int row, const int col)
 {
 	int data = IIC_INS_SET_DDRAM_ADDR;
 	if(col > IIC_MAX_COL || col < IIC_MIN_COL)
@@ -199,9 +182,9 @@ static int iic1602_set_position(const int col, const int row)
 		pr_err("[YOHDA] The second argument is invalid range. row:%d\n", row);
 		return -EINVAL;
 	}
-	
-	data |= col == IIC_MIN_COL ? row : (row + IIC_2LINE_ADDR);
-	iic1602_write_4bits_instruction(data);
+
+	data |= (col == IIC_MIN_COL) ? row : (row + IIC_2LINE_ADDR);
+	iic1602_write_4bits_instruction(iic1602, data);
 
 	return 0;	
 }
@@ -212,13 +195,13 @@ static int iic1602_reset(void)
 	return 0;
 }
 
-static void iic1602_clear_display(void)
+static void iic1602_clear_display(const struct iic1602_chip *iic1602)
 {
-	iic1602_write_4bits_instruction(IIC_INS_CLEAR_DISPLAY);
+	iic1602_write_4bits_instruction(iic1602, IIC_INS_CLEAR_DISPLAY);
 	udelay(500); // There is need to modify the delay value. Because, i can`t find out the condition about delay. If i don`t write this down, characters is displayed with strange characters.
 }
 
-static int iic1602_backlight_on(const bool on)
+static int iic1602_backlight_on(const struct iic1602_chip *iic1602, const bool on)
 {
 	int err;
 	bool on_off = !!on;
@@ -233,19 +216,19 @@ static int iic1602_backlight_on(const bool on)
 	return 0;
 }
 
-static int iic1602_display_on(const bool on)
+static int iic1602_display_on(const struct iic1602_chip *iic1602, const bool on)
 {
 	bool on_off = !!on;
 	unsigned int ins = (on_off ? DISPLAY_ON : IIC_INS_DISPLAY_ON_OFF);
 	
 	if(debug)
 		pr_info("iic1602 display on/off instruction:0x%x\n", ins);
-	iic1602_write_4bits_instruction(ins);
+	iic1602_write_4bits_instruction(iic1602, ins);
 
 	return 0;
 }
 
-static int iic1602_cursor_on(const bool on)
+static int iic1602_cursor_on(const struct iic1602_chip *iic1602, const bool on)
 {
 	bool on_off = !!on;
 /* 커서가 켜질때 될 때, 전제는 반드시 display가 켜서 있어야 한다. 그래서 0x04를 추가한 것이다. */	
@@ -253,12 +236,12 @@ static int iic1602_cursor_on(const bool on)
 
 	if(debug)
 		pr_info("iic1602 cursor on/off instruction:0x%x\n", ins);
-	iic1602_write_4bits_instruction(ins);
+	iic1602_write_4bits_instruction(iic1602, ins);
 
 	return 0;
 }
 
-static int iic1602_blink_cursor_on(const bool on)
+static int iic1602_blink_cursor_on(const struct iic1602_chip *iic1602, const bool on)
 {
 	bool on_off = !!on;
 /* 커서가 블링크 될 때, 전제는 반드시 display가 켜서 있어야 의미가 있다. 그래서 0x04를 추가한 것이다. */	
@@ -266,30 +249,30 @@ static int iic1602_blink_cursor_on(const bool on)
 
 	if(debug)
 		pr_info("iic1602 blink cursor on/off instruction:0x%x\n", ins);
-	iic1602_write_4bits_instruction(ins);
+	iic1602_write_4bits_instruction(iic1602, ins);
 
 	return 0;
 }
 
-static int iic1602_display_shift(const bool on, const bool dir)
+static int iic1602_display_shift(const struct iic1602_chip *iic1602, const bool on, const bool dir)
 {
 	bool on_off = !!on;
 	unsigned char ins = (dir == LEFT ? DISPLAY_LEFT : DISPLAY_RIGHT);
 	
 	if(debug)
 		pr_info("iic1602 display shift instruction:0x%x\n", ins);
-	iic1602_write_4bits_instruction(ins);
+	iic1602_write_4bits_instruction(iic1602, ins);
 	return 0;
 }
 
-static int iic1602_cursor_shift(const bool on, const bool dir)
+static int iic1602_cursor_shift(const struct iic1602_chip *iic1602, const bool on, const bool dir)
 {
 	bool on_off = !!on;
 	unsigned char ins = (dir == LEFT ? CURSOR_LEFT : CURSOR_RIGHT);
 	
 	if(debug)
 		pr_info("iic1602 cursor shift instruction:0x%x\n", ins);
-	iic1602_write_4bits_instruction(ins);
+	iic1602_write_4bits_instruction(iic1602, ins);
 
 	return 0;
 }
@@ -338,7 +321,44 @@ static int iic1602_read(unsigned char *buf)
 	return 0;	
 }
 
-static int iic1602_parse_dts(const struct device_node *np, struct iic1602_info *iic1602)
+static int iic1602_write_string(struct iic1602_chip *iic1602, const char *string)
+{
+	int len = strlen(string); 
+	int row = 0, col = 0, i;
+	char buf[IIC_MAX_STR_LEN];
+
+	if(len < IIC_MIN_ROW + 1)
+		return -EINVAL;
+
+	len = (len > IIC_MAX_STR_LEN) ? IIC_MAX_STR_LEN : len;
+	strncpy(buf, string, len);
+	if(buf[len-1] == '\n')
+		buf[len-1] = 0;
+	
+	iic1602_clear_display(iic1602);
+
+	row = col = 0;
+	for(i = 0, row = 0, col = 0; buf[i] ;i++) {
+		if(row > IIC_MAX_ROW) {
+			row = IIC_MIN_ROW;
+			col = 1;
+
+			iic1602_set_position(iic1602, row, col);
+		}
+
+		iic1602_write_4bits_data(iic1602, buf[i]);
+		row++;
+	}
+
+	strncpy(iic1602->status.string, buf, len);
+
+	iic1602->status.row = row;
+	iic1602->status.col = col;
+
+	return len;
+}
+
+static int iic1602_parse_dts(const struct device_node *np, struct iic1602_chip *iic1602)
 {
 	struct iic1602_spec *spec = &iic1602->spec;
 	struct i2c_client *client = iic1602->client;
@@ -384,42 +404,73 @@ static int iic1602_parse_dts(const struct device_node *np, struct iic1602_info *
 	ret = of_property_read_u16(np, "display-rows", &spec->row);
 	if(ret || !spec->row) {
 		pr_err("Not founded the display-rows property in device node.%d\n", spec->row);
-		return ret;
 	}
-
 	return 0;
 }
 
-static int iic1602_init(const struct iic1602_info* iic1602)
+static ssize_t iic1602_string_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct iic1602_chip *iic1602 = dev_get_drvdata(dev);	
+	
+	return sprintf(buf, "%s\n", iic1602->status.string);
+}
+
+static ssize_t iic1602_string_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t n)
+{
+	struct iic1602_chip *iic1602 = dev_get_drvdata(dev);
+   		
+	if(!buf)
+		return 0;
+	
+	return iic1602_write_string(iic1602, buf) ? n : 0;
+}
+
+static DEVICE_ATTR_RW(iic1602_string);
+
+static struct attribute *iic1602_attrs[] = {
+	&dev_attr_iic1602_string.attr,
+	NULL
+};
+
+static struct attribute_group iic1602_attr_group = {
+	.attrs = iic1602_attrs,
+};
+
+static const struct attribute_group *iic1602_attr_groups[] = {
+	&iic1602_attr_group,
+	NULL
+};
+
+static int iic1602_init(const struct iic1602_chip* iic1602)
 {
 	struct iic1602_spec *spec = &iic1602->spec;
 	u8 function_set = spec->mode ? BIT8 : BIT4; 
 	function_set |= LINE2;
 
 	/* 8-bit initialize */
-	iic1602_write_8bits(0x30|P3_BACKLIGHT);
+	iic1602_write(iic1602, 0x30|P3_BACKLIGHT);
 	mdelay(5);
-	iic1602_write_8bits(0x30|P3_BACKLIGHT);
+	iic1602_write(iic1602, 0x30|P3_BACKLIGHT);
 	udelay(100);
-	iic1602_write_8bits(0x30|P3_BACKLIGHT);
+	iic1602_write(iic1602, 0x30|P3_BACKLIGHT);
 	udelay(100);
-	iic1602_write_8bits(0x20|P3_BACKLIGHT);
+	iic1602_write(iic1602, 0x20|P3_BACKLIGHT);
 	
-	iic1602_write_4bits_instruction(function_set); /* Function Set */
+	iic1602_write_4bits_instruction(iic1602, function_set); /* Function Set */
 	udelay(53);
 	  
-	iic1602_display_on(FALSE); /* Display On/Off */
+	iic1602_display_on(iic1602, FALSE); /* Display On/Off */
 	udelay(53);
 
-	iic1602_clear_display(); /* Clear Display */
+	iic1602_clear_display(iic1602); /* Clear Display */
 	mdelay(3);
 
 	/* Entry Mode set(0x03) I/D:0x02, S:0x01 */
-	iic1602_write_4bits_instruction(0x06);
+	iic1602_write_4bits_instruction(iic1602, 0x06);
 
 	mdelay(200);
 	
-	iic1602_display_on(TRUE);
+	iic1602_display_on(iic1602, TRUE);
 	pr_info("YOHDA ST7760U initialized");
 	
 	return 0;
@@ -428,10 +479,9 @@ static int iic1602_init(const struct iic1602_info* iic1602)
 static int iic1602_probe(struct i2c_client *client,
                          const struct i2c_device_id *id)
 {
-	struct iic1602_info *iic1602;	
+	struct iic1602_chip *iic1602;	
     int err = -1;
-	pr_info("YOHDA Probe started!!!\n");
-	unsigned char u = 0x00;
+	u8 u = 0x00;
 
 	if(!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_BYTE_DATA))
 	{
@@ -440,82 +490,41 @@ static int iic1602_probe(struct i2c_client *client,
 	}
 
 	iic1602 = devm_kzalloc(&client->dev, sizeof(*iic1602), GFP_KERNEL);
-	if(!iic1602)
-	{
-		pr_err("Couldn`t allocate the memory.\n");
-		return -ENOMEM;
-	}
+	if(IS_ERR(iic1602))
+		return PTR_ERR(iic1602); 
 	
+	dev_set_drvdata(&client->dev, iic1602);
 	iic1602->client = client;
 	yohda_i2c_client = client;
-	
+
 	err = iic1602_parse_dts(client->dev.of_node, iic1602);
 	if(err)
 		return err;	
-	
+
+	iic1602_class = class_create(THIS_MODULE, "iic1602");
+    if (IS_ERR(iic1602_class))
+        return PTR_ERR(iic1602_class);
+
+	err = sysfs_create_groups(&client->dev.kobj, iic1602_attr_groups);
+	if(err)
+		return err;
+
 	iic1602_init(iic1602);
 
 	i2c_set_clientdata(client, iic1602);
-
-	iic1602_write_string("0");
-	//msleep(1000);
-	iic1602_read(&u);
-	u = 0;	
-
-	iic1602_write_string("1");
-	msleep(1000);
-	iic1602_read(&u);
-	u = 0;	
-
-	iic1602_write_string("2");
-	//msleep(1000);
-	iic1602_read(&u);
-	u = 0;	
-
-	iic1602_write_string("3");
-	msleep(1000);
-	iic1602_read(&u);
-	pr_info("read:0x%x\n", u);
-	u = 0;	
-
-	iic1602_write_string("4");
-	//msleep(1000);
-	iic1602_read(&u);
-	pr_info("read:0x%x\n", u);
-	u = 0;	
-
-	iic1602_write_string("5");
-	msleep(1000);
-	iic1602_read(&u);
-	pr_info("read:0x%x\n", u);
-	u = 0;	
-
-	iic1602_write_string("6");
-	//msleep(1000);
-	iic1602_read(&u);
-	pr_info("read:0x%x\n", u);
-	u = 0;	
-
-	iic1602_write_string("7");
-	msleep(1000);
-	iic1602_read(&u);
-	pr_info("read:0x%x\n", u);
-	u = 0;	
-
-	iic1602_write_string("8");
-	//msleep(1000);
-	iic1602_read(&u);
-	pr_info("read:0x%x\n", u);
-	u = 0;	
 
 	pr_info("YOHDA probe done!!!\n");
 	return 0;
 }
 
 static int iic1602_remove(struct i2c_client *client)
-{   
+{  
     pr_info("YOHDA Removed!!!\n");
-    return 0;
+
+	sysfs_remove_groups(&client->dev.kobj, iic1602_attr_groups);
+	class_destroy(iic1602_class);
+
+	return 0;
 }
 
 static const struct of_device_id iic1602_dt_ids[] = {
