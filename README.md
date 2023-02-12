@@ -32,7 +32,7 @@
     
   - **디바이스 트리 빌드**
     1. 디바이스트리 오버레이를 사용했습니다. 아래의 링크 참조하세요.
-      - https://yohda.tistory.com/entry/LINUXKERNELDT-devicetree-overlay%EB%A5%BC-%ED%86%B5%ED%95%B4-%EB%8F%99%EC%A0%81%EC%9C%BC%EB%A1%9C-%EC%88%98%EC%A0%95-%EB%82%B4%EC%97%AD-%EB%B0%98%EC%98%81%ED%95%98%EA%B8%B0
+        - https://yohda.tistory.com/entry/LINUXKERNELDT-devicetree-overlay%EB%A5%BC-%ED%86%B5%ED%95%B4-%EB%8F%99%EC%A0%81%EC%9C%BC%EB%A1%9C-%EC%88%98%EC%A0%95-%EB%82%B4%EC%97%AD-%EB%B0%98%EC%98%81%ED%95%98%EA%B8%B0
 ----
 ### 소스 설명
 1. PCF8574T는 하나의 레지스터만 존재하는 I/O Expander 입니다. 그래서 regmap을 사용하지 않고, i2c_smbus_write_byte / i2c_smbus_read_byte 를 사용했습니다.
