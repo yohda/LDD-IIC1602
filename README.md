@@ -29,4 +29,4 @@
     3. Wifi SSH - 위에 2가지 상황이 안될 경우 그나마 해볼 수 있는 상황이 생각됩니다. 해당 방법은 변수가 많아 좋아하지 않습니다(라즈베리파이3의 경우 고질적인 wifi 문제가 있습니다..).
 ----
 ### 소스 설명
-1. PCF8574T는 one register의 chip입니다. 그래서 regmap을 사용하지 않고, i2c_smbus_write_byte / i2c_smbus_read_byte 를 통해 
+1. PCF8574T는 하나의 레지스터만 존재하는 I/O Expander 입니다. 그래서 regmap을 사용하지 않고, i2c_smbus_write_byte / i2c_smbus_read_byte 를 통해 PCF8574
